@@ -1,16 +1,48 @@
-use std::io;
-use std::time::SystemTime;
-use crossterm::{cursor, style::Print, terminal::{Clear, ClearType}, event::{read, Event}, execute, queue};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::{Color, PrintStyledContent, ResetColor, SetForegroundColor, Stylize};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-
 use std::{
+    io::{
+        self,
+        prelude::*,
+        BufReader,
+        Stdout,
+    },
     fs::File,
-    io::{prelude::*, BufReader},
     path::Path,
+    fmt::{Debug, Formatter},
+    iter::repeat,
 };
-use std::fmt::{Debug, Formatter};
+use chrono::{DateTime, Local, TimeZone};
+use crossterm::{
+    cursor::{
+        self,
+        MoveTo,
+        MoveToRow,
+    },
+    event::{
+        read,
+        Event,
+        KeyCode,
+        KeyEvent,
+        KeyModifiers,
+    },
+    execute,
+    queue,
+    style::{
+        Color,
+        PrintStyledContent,
+        ResetColor,
+        Stylize,
+    },
+    terminal::{
+        self,
+        Clear,
+        ClearType,
+        disable_raw_mode,
+        enable_raw_mode,
+    },
+    style::ContentStyle,
+};
+use crossterm::cursor::{MoveDown, MoveToColumn};
+use crossterm::style::StyledContent;
 
 fn lines_from_file(filename: impl AsRef<Path>) -> io::Result<Vec<String>> {
     let file = File::open(filename)?;
@@ -50,6 +82,7 @@ fn main() -> Result<(), io::Error> {
     disable_raw_mode()?;
     execute!(stdout, ResetColor,
         Clear(ClearType::CurrentLine),
+        MoveToColumn(0),
         cursor::Show)?;
     Ok(())
 }
@@ -78,10 +111,8 @@ impl WordSet {
     }
 
     fn word_of_the_day(&self) -> String {
-        let now = SystemTime::now();
-        let elapsed = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        let idx = (elapsed.as_secs() - 1624057200) / 86400;
-
+        let epoch: DateTime<Local> = Local.ymd(2021, 6, 19).and_hms(0, 0, 0);
+        let idx = (Local::now().date().and_hms(0, 0, 0).timestamp() - epoch.timestamp()) / 86400;
         self.wordlist.iter().nth(idx as usize % self.wordlist.len()).unwrap().clone()
     }
 }
@@ -109,38 +140,6 @@ impl RusdleState {
 }
 
 impl RusdleState {
-    fn render(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        queue!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
-
-        for (guess_idx, (guess, result)) in self.guesses.iter().enumerate() {
-            queue!(stdout, Print(format!("  Guess {}: ", guess_idx + 1)))?;
-            for s in guess.chars().zip(result)
-                .map(|(c, r)| PrintStyledContent(c.on(result_colour(*r)))) {
-                queue!(stdout, s)?;
-            };
-            queue!(stdout, ResetColor, cursor::MoveToNextLine(1), Clear(ClearType::UntilNewLine))?
-        }
-
-        match &self.last_error {
-            None => {}
-            Some(msg) => queue!(stdout,
-                SetForegroundColor(Color::DarkYellow),
-                Print(msg),
-                ResetColor,
-                cursor::MoveToNextLine(1), Clear(ClearType::UntilNewLine))?
-        }
-
-        if self.is_over() {
-            queue!(stdout, Print(if self.is_win() { "Winner!" } else { "Loser!" } ))?;
-        } else {
-            queue!(stdout,
-                Print("New guess: "),
-                Print(self.entry.as_str()),
-            )?;
-        }
-        execute!(stdout, cursor::MoveToNextLine(1))
-    }
-
     fn handle_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char(char) => if self.entry.len() < 5 {
@@ -198,10 +197,91 @@ impl RusdleState {
     }
 }
 
-fn result_colour(r: u8) -> Color {
+const EMPTY_RESULT: [u8; 5] = [0; 5];
+
+fn render_boxed_word<I>(stdout: &mut Stdout, word: &str, styles: I) -> io::Result<()>
+    where I: Iterator<Item=(ContentStyle, ContentStyle)> {
+    let (_, y) = cursor::position()?;
+    let (cols, _) = terminal::size()?;
+    let x = (cols / 2) - (4 * word.len() as u16) / 2;
+    for ((ci, c), (box_style, text_style)) in word.char_indices().zip(styles) {
+        let cx = x + (ci as u16 * 4);
+        draw_box(stdout, (cx, y), (3, 3), box_style)?;
+        queue!(stdout, MoveTo(cx + 1, y + 1),
+            PrintStyledContent(text_style.apply(c)),
+            MoveDown(2), MoveToColumn(x))?;
+    }
+    Ok(())
+}
+
+fn render_message_centered(stdout: &mut Stdout, message: StyledContent<&str>) -> io::Result<()> {
+    queue!(stdout, MoveToColumn(terminal::size()?.0 / 2 - message.content().len() as u16 / 2), PrintStyledContent(message))
+}
+
+impl Renderable for RusdleState {
+    fn render(&self, stdout: &mut Stdout) -> io::Result<()> {
+        queue!(stdout, Clear(ClearType::All), ResetColor, MoveToRow(1))?;
+        let (_, rows) = terminal::size()?;
+
+        render_boxed_word(stdout, "RUSDLE", repeat((ContentStyle::new().blue().bold(), ContentStyle::new().white().bold().italic())))?;
+        render_message_centered(stdout, "Wordle in Rust".bold())?;
+        queue!(stdout, MoveDown(2))?;
+
+        let mut render_guess = |guess: &str, result: &[u8; 5]|
+            render_boxed_word(stdout, &guess, result.iter().map(|r| result_colours(*r)));
+        for (guess, result) in self.guesses.iter() { render_guess(guess, result)?; }
+        if !self.is_over() {
+            render_guess(&format!("{}_    ", self.entry)[..5], &[3u8;5])?;
+            for _ in self.guesses.len()..5 {
+                render_guess("     ", &EMPTY_RESULT)?;
+            }
+        }
+
+        let message = if self.is_over() {
+            if self.is_win() { "Winner!".green() }
+            else { "Loser!".red() }
+        } else {
+            match &self.last_error {
+                Some(msg) => msg.as_str().dark_yellow(),
+                _ => "".stylize(),
+            }
+        };
+
+        render_message_centered(stdout, message.slow_blink())?;
+        execute!(stdout, MoveToRow(rows))
+    }
+}
+
+trait Renderable {
+    fn render(&self, stdout: &mut Stdout) -> io::Result<()>;
+}
+
+fn draw_box(stdout: &mut Stdout, at: (u16, u16), size: (u16, u16), style: ContentStyle) -> io::Result<()> {
+    let (x, y) = at;
+    let (w, h) = size;
+    let pad = (w - 2) as usize;
+    queue!(stdout,
+        MoveTo(x, y),
+        PrintStyledContent(style.dim().apply(format!("\u{256d}{:\u{2500}<1$}\u{256e}", "", pad))),
+    )?;
+    for i in 1..h {
+        queue!(stdout,
+            MoveTo(x, y + i),
+            PrintStyledContent(style.dim().apply(format!("\u{2502}{: <1$}\u{2502}", "", pad))),
+        )?;
+    }
+    queue!(stdout,
+        MoveTo(x, y + h - 1),
+        PrintStyledContent(style.dim().apply(format!("\u{2570}{:\u{2500}<1$}\u{256f}", "", pad))),
+        ResetColor
+    )
+}
+
+fn result_colours(r: u8) -> (ContentStyle, ContentStyle) {
     match r {
-        1 => Color::DarkYellow,
-        2 => Color::DarkGreen,
-        _ => Color::DarkGrey,
+        1 => {let s = ContentStyle::new().yellow().bold(); (s, s)},
+        2 => {let s = ContentStyle::new().green().bold(); (s, s)},
+        3 => {let s = ContentStyle::new().grey().italic(); (s, s)},
+        _ => {let s = ContentStyle::new().dark_grey().bold(); (s, s.clone().white())},
     }
 }
