@@ -10,6 +10,7 @@ use std::{
     fmt::{Debug, Formatter},
     iter::repeat,
 };
+use std::collections::HashMap;
 use chrono::{DateTime, Local, TimeZone};
 use crossterm::{
     cursor::{
@@ -27,7 +28,7 @@ use crossterm::{
     execute,
     queue,
     style::{
-        Color,
+        Print,
         PrintStyledContent,
         ResetColor,
         Stylize,
@@ -124,6 +125,7 @@ struct RusdleState {
     entry: String,
     last_error: Option<String>,
     guesses: Vec<(String, [u8; 5])>,
+    clues: HashMap<char, u8>,
 }
 
 impl RusdleState {
@@ -133,8 +135,9 @@ impl RusdleState {
             words,
             target,
             last_error: None,
-            entry: String::new(),
-            guesses: Vec::new(),
+            entry: String::with_capacity(5),
+            guesses: Vec::with_capacity(6),
+            clues: HashMap::with_capacity(26),
         }
     }
 }
@@ -173,6 +176,9 @@ impl RusdleState {
             self.last_error = None;
             let guess = self.entry.clone();
             let result = self.compare_guess(&guess);
+
+            guess.chars().zip(result)
+                .for_each(|(c, r)| { self.clues.insert(c, r); });
 
             self.guesses.push((guess, result));
             self.entry.clear()
@@ -221,7 +227,7 @@ fn render_message_centered(stdout: &mut Stdout, message: StyledContent<&str>) ->
 impl Renderable for RusdleState {
     fn render(&self, stdout: &mut Stdout) -> io::Result<()> {
         queue!(stdout, Clear(ClearType::All), ResetColor, MoveToRow(1))?;
-        let (_, rows) = terminal::size()?;
+        let (cols, rows) = terminal::size()?;
 
         render_boxed_word(stdout, "RUSDLE", repeat((ContentStyle::new().blue().bold(), ContentStyle::new().white().bold().italic())))?;
         render_message_centered(stdout, "Wordle in Rust".bold())?;
@@ -231,15 +237,26 @@ impl Renderable for RusdleState {
             render_boxed_word(stdout, &guess, result.iter().map(|r| result_colours(*r)));
         for (guess, result) in self.guesses.iter() { render_guess(guess, result)?; }
         if !self.is_over() {
-            render_guess(&format!("{}_    ", self.entry)[..5], &[3u8;5])?;
+            render_guess(&format!("{}_    ", self.entry)[..5], &[3u8; 5])?;
             for _ in self.guesses.len()..5 {
                 render_guess("     ", &EMPTY_RESULT)?;
             }
+
+            let mut render_keyrow = |row: &str| {
+                queue!(stdout, MoveToColumn(cols / 2 - row.len() as u16))?;
+                for c in row.chars() {
+                    queue!(stdout, Print(" "), PrintStyledContent(result_colours(*self.clues.get(&c).unwrap_or(&3)).0.apply(c)))?;
+                }
+                queue!(stdout, MoveDown(1))
+            };
+
+            render_keyrow("qwertyuiop")?;
+            render_keyrow("asdfghjkl")?;
+            render_keyrow("zxcvbnm")?;
         }
 
         let message = if self.is_over() {
-            if self.is_win() { "Winner!".green() }
-            else { "Loser!".red() }
+            if self.is_win() { "Winner!".green() } else { "Loser!".red() }
         } else {
             match &self.last_error {
                 Some(msg) => msg.as_str().dark_yellow(),
@@ -279,9 +296,21 @@ fn draw_box(stdout: &mut Stdout, at: (u16, u16), size: (u16, u16), style: Conten
 
 fn result_colours(r: u8) -> (ContentStyle, ContentStyle) {
     match r {
-        1 => {let s = ContentStyle::new().yellow().bold(); (s, s)},
-        2 => {let s = ContentStyle::new().green().bold(); (s, s)},
-        3 => {let s = ContentStyle::new().grey().italic(); (s, s)},
-        _ => {let s = ContentStyle::new().dark_grey().bold(); (s, s.clone().white())},
+        1 => {
+            let s = ContentStyle::new().yellow().bold();
+            (s, s)
+        }
+        2 => {
+            let s = ContentStyle::new().green().bold();
+            (s, s)
+        }
+        3 => {
+            let s = ContentStyle::new().grey().bold();
+            (s, s)
+        }
+        _ => {
+            let s = ContentStyle::new().dark_grey();
+            (s, s)
+        }
     }
 }
