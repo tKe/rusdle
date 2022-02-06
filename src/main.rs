@@ -10,6 +10,8 @@ use std::{
     fmt::{Debug, Formatter},
     iter::repeat,
 };
+use rand::seq::SliceRandom;
+use clap::{Parser, ArgEnum};
 use std::collections::HashMap;
 use chrono::{DateTime, Local, TimeZone};
 use crossterm::{
@@ -52,16 +54,22 @@ fn lines_from_file(filename: impl AsRef<Path>) -> io::Result<Vec<String>> {
     BufReader::new(file).lines().collect()
 }
 
+#[derive(Parser)]
+struct Cli {
+    #[clap(arg_enum, default_value_t = GameMode::Wordle)]
+    mode: GameMode
+}
+
 fn main() -> Result<(), io::Error> {
-    enable_raw_mode()?;
-
-    let mut stdout = io::stdout();
-    execute!(stdout, cursor::Hide)?;
-
+    let cli = Cli::parse();
     let mut game = RusdleState::new(
-        WordSet::load("./data/wordlist.txt", "./data/guesses.txt")?
+        WordSet::load("./data/wordlist.txt", "./data/guesses.txt")?,
+        cli.mode
     );
 
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, cursor::Hide)?;
     loop {
         game.render(&mut stdout)?;
         if game.is_over() {
@@ -73,7 +81,7 @@ fn main() -> Result<(), io::Error> {
                     modifiers: KeyModifiers::CONTROL, code: KeyCode::Char('c')
                 } => break,
                 KeyEvent {
-                    modifiers: KeyModifiers::NONE,
+                    modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                     code
                 } => game.handle_key(code),
                 _ => {}
@@ -86,8 +94,7 @@ fn main() -> Result<(), io::Error> {
     execute!(stdout, ResetColor,
         Clear(ClearType::CurrentLine),
         MoveToColumn(0),
-        cursor::Show)?;
-    Ok(())
+        cursor::Show)
 }
 
 struct WordSet {
@@ -118,8 +125,12 @@ impl WordSet {
         let epoch: DateTime<Local> = Local.ymd(2021, 6, 19).and_hms(0, 0, 0);
         let idx = (Local::now().date().and_hms(0, 0, 0).timestamp() - epoch.timestamp()) / 86400;
         self.wordlist.get(idx as usize % self.wordlist.len())
-            .map(|w| w.to_ascii_uppercase())
-            .unwrap()
+            .unwrap().to_ascii_uppercase()
+    }
+
+    fn random_word(&self) -> String {
+        self.wordlist.choose(&mut rand::thread_rng())
+            .unwrap().to_ascii_uppercase()
     }
 }
 
@@ -133,9 +144,19 @@ struct RusdleState {
     clues: HashMap<char, u8>,
 }
 
+#[derive(ArgEnum, Clone)]
+enum GameMode { 
+    Wordle,
+    RandomWord,
+}
+
 impl RusdleState {
-    pub fn new(words: WordSet) -> Self {
-        let target = words.word_of_the_day().chars().collect();
+    pub fn new(words: WordSet, mode: GameMode) -> Self {
+        let word = match mode {
+            GameMode::RandomWord => words.random_word(),
+            GameMode::Wordle => words.word_of_the_day()
+        };
+        let target = word.chars().collect();
         Self {
             words,
             target,
@@ -150,7 +171,7 @@ impl RusdleState {
 impl RusdleState {
     fn handle_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Char(c @ 'a'..='z') => if self.entry.len() < 5 {
+            KeyCode::Char(c) if c.is_ascii_alphabetic() => if self.entry.len() < 5 {
                 self.entry.push(c.to_ascii_uppercase())
             },
             KeyCode::Backspace => if self.entry.len() > 0 {
