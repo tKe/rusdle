@@ -13,6 +13,7 @@ use std::{
 use rand::seq::SliceRandom;
 use clap::{Parser, ArgEnum};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use chrono::{DateTime, Local, TimeZone};
 use crossterm::{
     cursor::{
@@ -57,13 +58,17 @@ fn lines_from_file(filename: impl AsRef<Path>) -> io::Result<Vec<String>> {
 #[derive(Parser)]
 struct Cli {
     #[clap(arg_enum, default_value_t = GameMode::Wordle)]
-    mode: GameMode
+    mode: GameMode,
+    #[clap(short, long, parse(from_os_str), value_name = "FILE")]
+    word_list: Option<PathBuf>,
+    #[clap(short, long, parse(from_os_str), value_name = "FILE")]
+    dictionary: Option<PathBuf>,
 }
 
 fn main() -> Result<(), io::Error> {
     let cli = Cli::parse();
     let mut game = RusdleState::new(
-        WordSet::load("./data/wordlist.txt", "./data/guesses.txt")?,
+        WordSet::load(cli.word_list, cli.dictionary)?,
         cli.mode
     );
 
@@ -109,11 +114,15 @@ impl Debug for WordSet {
 }
 
 impl WordSet {
-    fn load(wordlist_path: &str, guesses_path: &str) -> io::Result<Self> {
-        Ok(WordSet {
-            wordlist: lines_from_file(wordlist_path)?,
-            valid_guesses: lines_from_file(guesses_path)?,
-        })
+    fn load(wordlist_path: Option<impl AsRef<Path>>, guesses_path: Option<impl AsRef<Path>>) -> io::Result<Self> {
+        let wordlist = wordlist_path
+            .map(|p| lines_from_file(p))
+            .unwrap_or(Ok(include_str!("../data/wordlist.txt").lines().map(|s| String::from(s)).collect()))?;
+        let valid_guesses = guesses_path
+            .map(|p| lines_from_file(p))
+            .unwrap_or(Ok(include_str!("../data/guesses.txt").lines().map(|s| String::from(s)).collect()))?;
+
+        Ok(WordSet { wordlist, valid_guesses })
     }
 
     fn is_valid(&self, word: &String) -> bool {
