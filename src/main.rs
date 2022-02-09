@@ -22,7 +22,7 @@ use crossterm::{
         MoveUp,
         MoveDown,
         MoveLeft,
-        MoveToColumn
+        MoveToColumn,
     },
     event::{
         read,
@@ -69,7 +69,7 @@ fn main() -> Result<(), io::Error> {
     let cli = Cli::parse();
     let mut game = RusdleState::new(
         WordSet::load(cli.word_list, cli.dictionary)?,
-        cli.mode
+        cli.mode,
     );
 
     enable_raw_mode()?;
@@ -102,6 +102,7 @@ fn main() -> Result<(), io::Error> {
         cursor::Show)
 }
 
+#[derive(Clone)]
 struct WordSet {
     wordlist: Vec<String>,
     valid_guesses: Vec<String>,
@@ -125,7 +126,7 @@ impl WordSet {
         Ok(WordSet { wordlist, valid_guesses })
     }
 
-    fn is_valid(&self, word: &String) -> bool {
+    fn is_valid(&self, word: &str) -> bool {
         let needle = &word.to_lowercase();
         self.wordlist.contains(needle) || self.valid_guesses.contains(needle)
     }
@@ -154,7 +155,7 @@ struct RusdleState {
 }
 
 #[derive(ArgEnum, Clone)]
-enum GameMode { 
+enum GameMode {
     Wordle,
     RandomWord,
 }
@@ -165,7 +166,12 @@ impl RusdleState {
             GameMode::RandomWord => words.random_word(),
             GameMode::Wordle => words.word_of_the_day()
         };
-        let target = word.chars().collect();
+        Self::new_with_target(words, &word)
+    }
+
+    fn new_with_target(words: WordSet, target: &str) -> RusdleState {
+        assert!(words.is_valid(target));
+        let target = target.chars().collect();
         Self {
             words,
             target,
@@ -199,7 +205,7 @@ impl RusdleState {
 
     fn is_win(&self) -> bool {
         match self.guesses.last() {
-            Some((_, [RES_CORRECT,RES_CORRECT,RES_CORRECT,RES_CORRECT,RES_CORRECT,])) => true,
+            Some((_, r)) if *r == [RES_CORRECT; 5] => true,
             _ => false,
         }
     }
@@ -213,8 +219,8 @@ impl RusdleState {
             let result = self.compare_guess(&guess);
 
             guess.chars().zip(result)
-                .for_each(|(c, r)| { 
-                    let clue = self.clues.entry(c).or_insert(r); 
+                .for_each(|(c, r)| {
+                    let clue = self.clues.entry(c).or_insert(r);
                     if r > *clue { *clue = r }
                 });
 
@@ -223,17 +229,22 @@ impl RusdleState {
         }
     }
 
-    fn compare_guess(&mut self, guess: &String) -> [u8; 5] {
-        let mut avail: Vec<char> = self.target.clone();
+    fn compare_guess(&mut self, guess: &str) -> [u8; 5] {
+        let mut unmatched: Vec<char> = self.target.iter().cloned()
+            .zip(guess.chars())
+            .filter_map(|(actual, guessed)| if actual != guessed { Some(actual) } else { None })
+            .collect();
+
         guess.char_indices()
-            .map(|(i, c)| {
-                let loc = avail.iter().position(|x| *x == c);
-                match loc {
-                    None => RES_WRONG,
+            .map(|(i, c)| if c == self.target[i] {
+                RES_CORRECT
+            } else {
+                match unmatched.iter().position(|x| *x == c) {
                     Some(idx) => {
-                        avail.swap_remove(idx);
-                        if c == self.target[i] { RES_CORRECT } else { RES_PRESENT }
+                        unmatched.swap_remove(idx);
+                        RES_PRESENT
                     }
+                    None => RES_WRONG,
                 }
             })
             .collect::<Vec<u8>>()
@@ -285,7 +296,7 @@ impl Renderable for RusdleState {
             queue!(stdout, MoveToColumn(cols / 2 - row.len() as u16), MoveDown(1))?;
             let mut prev_style = ContentStyle::new();
             for c in row.chars() {
-                if c == ' ' { continue }
+                if c == ' ' { continue; }
                 let style = match self.clues.get(&c).map(|r| *r) {
                     Some(RES_WRONG) => ContentStyle::new().dark_grey().on(Color::from((32, 32, 32))),
                     Some(r) => result_colours(r),
@@ -377,5 +388,50 @@ fn result_colours(r: u8) -> ContentStyle {
         RES_PRESENT => ContentStyle::new().black().on_dark_yellow().bold(),
         RES_CORRECT => ContentStyle::new().black().on_dark_green().bold(),
         _ => panic!("unknown char result {}", r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_words() -> WordSet { WordSet::load(None::<&str>, None::<&str>).unwrap() }
+
+    fn test_game(target: &str) -> RusdleState {
+        RusdleState::new_with_target(default_words(), target)
+    }
+
+    fn result(code: &str) -> [u8; 5] {
+        code.chars()
+            .map(|c| {
+                match c {
+                    '!' => RES_CORRECT,
+                    '?' => RES_PRESENT,
+                    'x' => RES_WRONG,
+                    _ => panic!("unknown code char {}", c)
+                }
+            })
+            .collect::<Vec<u8>>().as_slice()
+            .try_into().unwrap()
+    }
+
+    #[test]
+    fn compare_guess_confirms_all_match() {
+        assert_eq!(test_game("MATCH").compare_guess("MATCH"), result("!!!!!"))
+    }
+
+    #[test]
+    fn compare_guess_allows_double_correct() {
+        assert_eq!(test_game("NOOBS").compare_guess("ROOTY"), result("x!!xx"))
+    }
+
+    #[test]
+    fn compare_guess_allows_double_present() {
+        assert_eq!(test_game("NOOBS").compare_guess("IGLOO"), result("xxx??"))
+    }
+
+    #[test]
+    fn compare_guess_isnt_greedy() {
+        assert_eq!(test_game("FRAME").compare_guess("ELIDE"), result("xxxx!"))
     }
 }
