@@ -236,17 +236,14 @@ impl RusdleState {
             .collect();
 
         guess.char_indices()
-            .map(|(i, c)| if c == self.target[i] {
-                RES_CORRECT
-            } else {
-                match unmatched.iter().position(|x| *x == c) {
-                    Some(idx) => {
-                        unmatched.swap_remove(idx);
-                        RES_PRESENT
-                    }
-                    None => RES_WRONG,
-                }
-            })
+            .map(|(i, c)|
+                if c == self.target[i] {
+                    RES_CORRECT
+                } else if unmatched.remove_item(c) {
+                    RES_PRESENT
+                } else {
+                    RES_WRONG
+                })
             .collect::<Vec<u8>>()
             .try_into().unwrap()
     }
@@ -391,6 +388,22 @@ fn result_colours(r: u8) -> ContentStyle {
     }
 }
 
+trait MutVecExt<T> {
+    fn remove_item(&mut self, val: T) -> bool;
+}
+
+impl<T: PartialEq> MutVecExt<T> for Vec<T> {
+    fn remove_item(&mut self, val: T) -> bool {
+        match self.iter().position(|x| *x == val) {
+            Some(idx) => {
+                self.swap_remove(idx);
+                true
+            }
+            None => false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +424,7 @@ mod tests {
                     _ => panic!("unknown code char {}", c)
                 }
             })
-            .collect::<Vec<u8>>().as_slice()
+            .collect::<Vec<u8>>()
             .try_into().unwrap()
     }
 
