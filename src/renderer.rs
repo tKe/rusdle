@@ -1,20 +1,38 @@
 use crate::{
-    game::{RusdleState, RES_CORRECT, RES_DEFAULT, RES_PRESENT, RES_WRONG},
+    game::{GameInput, RusdleState, RES_CORRECT, RES_DEFAULT, RES_PRESENT, RES_WRONG},
     rendering::{render_boxed_word, render_message_centered},
 };
 use crossterm::{
     cursor::{self, MoveDown, MoveLeft, MoveTo, MoveToColumn},
+    event::{read, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{Color, ContentStyle, PrintStyledContent, ResetColor, Stylize},
     terminal::{self, disable_raw_mode, enable_raw_mode, Clear, ClearType},
 };
 use std::{io, iter::repeat};
 
-pub struct Renderer {
+pub(crate) trait Renderer {
+    fn next_input(&self) -> io::Result<Option<GameInput>>;
+    fn render(&mut self, state: &RusdleState) -> io::Result<()>;
+}
+
+pub(crate) fn with_terminal<F: FnOnce(&mut dyn Renderer) -> io::Result<()>>(
+    func: F,
+) -> io::Result<()> {
+    let stdout = Box::leak(Box::new(io::stdout()));
+    let mut r = TerminalRenderer {
+        stdout: stdout.lock(),
+    };
+    r.init()?;
+    func(&mut r)?;
+    r.destroy()
+}
+
+struct TerminalRenderer {
     stdout: std::io::StdoutLock<'static>,
 }
 
-impl Renderer {
+impl TerminalRenderer {
     fn init(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
         execute!(self.stdout, cursor::Hide)
@@ -29,19 +47,9 @@ impl Renderer {
             cursor::Show
         )
     }
-
-    pub(super) fn with<F: FnOnce(&mut Self) -> io::Result<()>>(func: F) -> io::Result<()> {
-        let stdout = Box::leak(Box::new(io::stdout()));
-        let mut r = Renderer {
-            stdout: stdout.lock(),
-        };
-        r.init()?;
-        func(&mut r)?;
-        r.destroy()
-    }
 }
 
-impl Renderer {
+impl TerminalRenderer {
     fn render_header(&mut self) -> io::Result<()> {
         render_boxed_word(
             &mut self.stdout,
@@ -136,7 +144,34 @@ impl Renderer {
 
         render_message_centered(&mut self.stdout, message.slow_blink())
     }
-    pub(crate) fn render(&mut self, state: &RusdleState) -> io::Result<()> {
+}
+
+impl Renderer for TerminalRenderer {
+    fn next_input(&self) -> io::Result<Option<GameInput>> {
+        Ok(match read()? {
+            Event::Key(event) => match event {
+                KeyEvent {
+                    modifiers: KeyModifiers::CONTROL,
+                    code: KeyCode::Char('c'),
+                } => Some(GameInput::Quit),
+                KeyEvent {
+                    modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                    code,
+                } => match code {
+                    KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                        Some(GameInput::Input(c.to_ascii_uppercase()))
+                    }
+                    KeyCode::Backspace => Some(GameInput::Delete),
+                    KeyCode::Enter => Some(GameInput::Submit),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn render(&mut self, state: &RusdleState) -> io::Result<()> {
         queue!(self.stdout, Clear(ClearType::All), ResetColor, MoveTo(0, 0))?;
         self.render_header()?;
         self.render_guesses(&state)?;

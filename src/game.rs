@@ -1,4 +1,3 @@
-use crate::MutVecExt;
 use chrono::{DateTime, Local, TimeZone};
 use clap::ArgEnum;
 use rand::seq::SliceRandom;
@@ -88,8 +87,9 @@ pub enum GameMode {
 
 pub enum GameInput {
     Delete,
-    Submit,
     Input(char),
+    Quit,
+    Submit,
 }
 
 impl RusdleState {
@@ -131,6 +131,7 @@ impl RusdleState {
                     self.process_guess();
                 }
             }
+            GameInput::Quit => {}
         }
     }
 
@@ -205,6 +206,21 @@ pub const RES_CORRECT: u8 = 3;
 fn lines_from_file(filename: impl AsRef<Path>) -> io::Result<Vec<String>> {
     let file = File::open(filename)?;
     BufReader::new(file).lines().collect()
+}
+
+trait MutVecExt<T> {
+    fn remove_item(&mut self, val: T) -> bool;
+}
+
+impl<T: PartialEq> MutVecExt<T> for Vec<T> {
+    fn remove_item(&mut self, val: T) -> bool {
+        if let Some(idx) = self.iter().position(|x| *x == val) {
+            self.swap_remove(idx);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
